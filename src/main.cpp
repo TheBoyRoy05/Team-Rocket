@@ -1,9 +1,12 @@
 #include "blink-led.hpp"
+#include "write-data.hpp"
+#include "card-info.hpp"
 
 void setup() {
-  blink_led::setup();
+  card_info::setup();
+  write_data::setup();
 }
 
 void loop() {
-  blink_led::loop();
+  write_data::loop();
 }
