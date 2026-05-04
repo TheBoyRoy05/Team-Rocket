@@ -1,12 +1,9 @@
-#include "blink-led.hpp"
-#include "write-data.hpp"
-#include "card-info.hpp"
+#include "imu.hpp"
 
 void setup() {
-  card_info::setup();
-  write_data::setup();
+  imu::setup();
 }
 
 void loop() {
-  write_data::loop();
+  imu::loop();
 }
