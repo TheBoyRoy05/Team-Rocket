@@ -4,6 +4,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 namespace write_data {
 
@@ -18,6 +19,12 @@ inline File& log_file() {
 
 inline void setup() {
   Serial.begin(115200);
+  // Feather 32u4 uses USB CDC: give the host time to open the port so early
+  // messages (SD status) are not dropped right after reset/upload.
+  const unsigned long usb_wait_start = millis();
+  while (!Serial && (millis() - usb_wait_start) < 5000) {
+    delay(10);
+  }
 
   SPI.begin();
   if (!SD.begin(kSdCsPin)) {
@@ -48,11 +55,16 @@ inline void loop() {
   const float temp_c = 20.0f + static_cast<float>(counter % 17) * 0.1f;
   const float hum_pct = 45.0f + static_cast<float>(counter % 23) * 0.2f;
 
+  // AVR newlib-nano snprintf does not reliably handle %f (prints '?'); dtostrf is the usual fix.
+  char temp_buf[12];
+  char hum_buf[12];
+  dtostrf(static_cast<double>(temp_c), 0, 2, temp_buf);
+  dtostrf(static_cast<double>(hum_pct), 0, 2, hum_buf);
+
   char line[56];
   const int n =
-      snprintf(line, sizeof(line), "%lu,%lu,%.2f,%.2f\n", t,
-               static_cast<unsigned long>(counter), static_cast<double>(temp_c),
-               static_cast<double>(hum_pct));
+      snprintf(line, sizeof(line), "%lu,%lu,%s,%s\n", t,
+               static_cast<unsigned long>(counter), temp_buf, hum_buf);
   if (n <= 0 || n >= static_cast<int>(sizeof(line))) {
     Serial.println(F("write_data: snprintf failed or line too long"));
   } else {
