@@ -8,7 +8,7 @@ namespace read_data {
 
 // Match write_data.hpp (Feather Adalogger / wing SD CS).
 constexpr int kSdCsPin = 4;
-constexpr char kLogFilename[] = "dummy.csv";
+constexpr char kLogFilename[] = "flight.csv";
 
 // Call from your sketch setup(), e.g. after Serial is ready. Prints the full
 // file to Serial (chunked for small RAM on AVR).
@@ -27,11 +27,14 @@ inline void setup() {
 
   File f = SD.open(kLogFilename, FILE_READ);
   if (!f) {
-    Serial.println(F("read_data: could not open dummy.csv"));
+    Serial.print(F("read_data: could not open "));
+    Serial.println(kLogFilename);
     return;
   }
 
-  Serial.println(F("read_data: --- dummy.csv ---"));
+  Serial.print(F("read_data: --- "));
+  Serial.print(kLogFilename);
+  Serial.println(F(" ---"));
   uint8_t buf[64];
   while (f.available()) {
     const int n = f.read(buf, sizeof(buf));

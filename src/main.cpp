@@ -1,17 +1,21 @@
-#include "imu.hpp"
 #include "bmp390.hpp"
+#include "flight-log.hpp"
+#include "imu.hpp"
 #include "read-data.hpp"
-#include "write-data.hpp"
 
 void setup() {
+  // flight_log::setup();
   // imu::setup();
   // bmp390::setup();
   read_data::setup();
-  // write_data::setup();
 }
 
 void loop() {
-  // imu::loop();
-  // bmp390::loop();
-  // write_data::loop();
+  // flight::ImuSample imu_sample{};
+  // flight::BmpSample bmp_sample{};
+  // imu::sample_for_flight(imu_sample);
+  // bmp390::sample_for_flight(bmp_sample);
+  // flight_log::append_row(millis(), imu_sample, bmp_sample);
+  // flight_log::flush();
+  // delay(100);
 }

@@ -11,6 +11,8 @@
 #include <Wire.h>
 #include <Adafruit_BMP3XX.h>
 
+#include "flight-log-types.hpp"
+
 namespace bmp390 {
 
 constexpr uint8_t kDefaultI2cAddr = BMP3XX_DEFAULT_ADDRESS;
@@ -25,9 +27,7 @@ inline Adafruit_BMP3XX& sensor() {
 }
 
 inline void setup() {
-  Serial.begin(9600);
-  Serial.println(F("BMP390 / BMP3XX test"));
-  Serial.println();
+  // Serial.begin from flight_log::setup / sketch if you want USB messages.
 
   Wire.begin();
 
@@ -38,13 +38,25 @@ inline void setup() {
     }
   }
 
-  Serial.print(F("chip_id: 0x"));
-  Serial.println(sensor().chipID(), HEX);
-
   sensor().setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
   sensor().setPressureOversampling(BMP3_OVERSAMPLING_4X);
   sensor().setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
   sensor().setOutputDataRate(BMP3_ODR_50_HZ);
+}
+
+inline bool sample_for_flight(flight::BmpSample& out) {
+  if (!sensor().performReading()) {
+    out.ok = false;
+    out.temp_c = 0;
+    out.pressure_hpa = 0;
+    out.altitude_m = 0;
+    return false;
+  }
+  out.ok = true;
+  out.temp_c = sensor().temperature;
+  out.pressure_hpa = sensor().pressure / 100.0f;
+  out.altitude_m = sensor().readAltitude(kSealevelPressureHpa);
+  return true;
 }
 
 inline void loop() {
