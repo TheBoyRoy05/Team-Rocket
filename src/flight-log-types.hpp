@@ -4,7 +4,7 @@
 
 namespace flight {
 
-// Filled by imu::sample_for_flight / bmp390::sample_for_flight, then formatted by flight_log.
+// Filled by imu::sample_for_flight / bmp390::sample_for_flight, then formatted by sd::append_flight_row.
 struct ImuSample {
   uint8_t cal_sys{};
   uint8_t cal_gyro{};

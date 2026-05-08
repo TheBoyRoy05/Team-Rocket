@@ -21,7 +21,7 @@ inline Adafruit_BNO055& sensor() {
 }
 
 inline void setup() {
-  // Call Serial.begin from flight_log::setup (or sketch) before setup() if you
+  // Call Serial.begin from sd::flight_log_setup (or sketch) before setup() if you
   // want the messages below on USB.
 
   // Default mode is OPERATION_MODE_NDOF (9-DoF sensor fusion).
@@ -36,7 +36,7 @@ inline void setup() {
   sensor().setExtCrystalUse(true);
 }
 
-// Fill flight::ImuSample for SD logging (call flight_log::setup / Serial first for debug).
+// Fill flight::ImuSample for SD logging (call sd::flight_log_setup / Serial first for debug).
 inline void sample_for_flight(flight::ImuSample& out) {
   sensor().getCalibration(&out.cal_sys, &out.cal_gyro, &out.cal_accel,
                           &out.cal_mag);

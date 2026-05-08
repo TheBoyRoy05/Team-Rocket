@@ -27,7 +27,7 @@ inline Adafruit_BMP3XX& sensor() {
 }
 
 inline void setup() {
-  // Serial.begin from flight_log::setup / sketch if you want USB messages.
+  // Serial.begin from sd::flight_log_setup / sketch if you want USB messages.
 
   Wire.begin();
 

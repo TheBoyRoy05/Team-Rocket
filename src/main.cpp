@@ -1,13 +1,16 @@
 #include "bmp390.hpp"
-#include "flight-log.hpp"
 #include "imu.hpp"
-#include "read-data.hpp"
+#include "sd.hpp"
 
 void setup() {
-  // flight_log::setup();
+  sd::setup_32u4();
+
+  // sd::flight_log_setup();
   // imu::setup();
   // bmp390::setup();
-  read_data::setup();
+  
+  sd::begin();
+  sd::dump_file_to_serial(sd::kFlightCsv);
 }
 
 void loop() {
@@ -15,7 +18,7 @@ void loop() {
   // flight::BmpSample bmp_sample{};
   // imu::sample_for_flight(imu_sample);
   // bmp390::sample_for_flight(bmp_sample);
-  // flight_log::append_row(millis(), imu_sample, bmp_sample);
-  // flight_log::flush();
+  // sd::append_flight_row(millis(), imu_sample, bmp_sample);
+  // sd::flight_log_flush();
   // delay(100);
 }

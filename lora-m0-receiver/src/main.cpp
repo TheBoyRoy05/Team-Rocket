@@ -112,7 +112,7 @@ void loop() {
       Serial.print(F("RSSI: "));
       Serial.println(rf95.lastRssi(), DEC);
 
-      uint8_t data[] = "And hello back to you";
+      uint8_t data[] = "Received message";
       rf95.send(data, sizeof(data));
       rf95.waitPacketSent();
       Serial.println(F("Sent a reply"));
