@@ -1,12 +1,21 @@
 // Feather9x_RX — RadioHead RH_RF95 receiver for Feather M0 RFM9x.
-// Based on Adafruit’s guide:
-// https://learn.adafruit.com/adafruit-feather-m0-radio-with-lora-radio-module/using-the-rfm-9x-radio
+// Decodes full TR v1 telemetry (see src/flight_packet.hpp): prints CSV + RSSI on Serial,
+// optionally appends the same rows to lora_rx.csv when SD is enabled (see platformio).
 //
-// LoRa params match repo `src/lora_tx_main.cpp` (Feather 32u4 RadioHead TX): SF7, BW 125 kHz, CR 4/5,
-// preamble 8, sync word 0x12, 915 MHz.
+// LoRa params match TX: SF7, BW 125 kHz, CR 4/5, preamble 8, sync 0x12, 915 MHz.
 
 #include <SPI.h>
 #include <RH_RF95.h>
+
+#include "flight_packet.hpp"
+
+#ifndef RPL_RX_SD_CS
+#define RPL_RX_SD_CS (-1)
+#endif
+
+#if RPL_RX_SD_CS >= 0
+#include <SD.h>
+#endif
 
 #if defined(__AVR_ATmega32U4__)
 #define RFM95_CS 8
@@ -56,6 +65,11 @@
 
 RH_RF95 rf95(RFM95_CS, RFM95_INT);
 
+#if RPL_RX_SD_CS >= 0
+static File rx_log;
+static bool rx_sd_ok = false;
+#endif
+
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(RFM95_RST, OUTPUT);
@@ -68,7 +82,26 @@ void setup() {
 #endif
   delay(100);
 
-  Serial.println(F("Feather LoRa RX (RadioHead)"));
+  Serial.println(F("LoRa RX: TR telemetry -> USB CSV (+ RSSI col); SD if built with RPL_RX_SD_CS"));
+
+#if RPL_RX_SD_CS >= 0
+  if (SD.begin(RPL_RX_SD_CS)) {
+    rx_log = SD.open("lora_rx.csv", FILE_WRITE);
+    if (rx_log) {
+      const uint32_t sz = rx_log.size();
+      (void)rx_log.seek(sz);
+      if (sz == 0U) {
+        flight_packet::print_tr_csv_header(rx_log, true);
+        rx_log.flush();
+      }
+      rx_sd_ok = true;
+      Serial.println(F("SD: append lora_rx.csv"));
+    }
+  }
+  if (!rx_sd_ok) {
+    Serial.println(F("SD: disabled (fail or no card)"));
+  }
+#endif
 
   digitalWrite(RFM95_RST, LOW);
   delay(10);
@@ -77,48 +110,75 @@ void setup() {
 
   while (!rf95.init()) {
     Serial.println(F("LoRa radio init failed"));
-    Serial.println(F("Uncomment '#define SERIAL_DEBUG' in RH_RF95.cpp for detailed debug info"));
-    while (1) { delay(1000); }
+    while (1) {
+      delay(1000);
+    }
   }
-  Serial.println(F("LoRa radio init OK!"));
+  Serial.println(F("LoRa radio init OK"));
 
   if (!rf95.setFrequency(RF95_FREQ)) {
     Serial.println(F("setFrequency failed"));
-    while (1) { delay(1000); }
+    while (1) {
+      delay(1000);
+    }
   }
-  Serial.print(F("Set Freq to: "));
+  Serial.print(F("Freq MHz "));
   Serial.println(RF95_FREQ);
 
   rf95.setModemConfig(RH_RF95::Bw125Cr45Sf128);
   rf95.setPreambleLength(8);
   rf95.spiWrite(RH_RF95_REG_39_SYNC_WORD, 0x12);
-
   rf95.setTxPower(23, false);
+
+  flight_packet::print_tr_csv_header(Serial, true);
 }
 
 void loop() {
-  if (rf95.available()) {
-    uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
-    uint8_t len = sizeof(buf);
+  if (!rf95.available()) {
+    return;
+  }
 
-    if (rf95.recv(buf, &len)) {
-      digitalWrite(LED_BUILTIN, HIGH);
-      RH_RF95::printBuffer("Received: ", buf, len);
-      if (len < sizeof(buf)) {
-        buf[len] = 0;
-      }
-      Serial.print(F("Got: "));
-      Serial.println(reinterpret_cast<char*>(buf));
-      Serial.print(F("RSSI: "));
-      Serial.println(rf95.lastRssi(), DEC);
+  uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
+  uint8_t len = sizeof(buf);
 
-      uint8_t data[] = "Received message";
-      rf95.send(data, sizeof(data));
-      rf95.waitPacketSent();
-      Serial.println(F("Sent a reply"));
-      digitalWrite(LED_BUILTIN, LOW);
-    } else {
-      Serial.println(F("Receive failed"));
+  if (!rf95.recv(buf, &len)) {
+    Serial.println(F("Receive failed"));
+    return;
+  }
+
+  digitalWrite(LED_BUILTIN, HIGH);
+  const int16_t rssi = static_cast<int16_t>(rf95.lastRssi());
+
+  if (len >= flight_packet::kEncodedSize && buf[0] == flight_packet::kMagic0 &&
+      buf[1] == flight_packet::kMagic1 && buf[2] == flight_packet::kVersion) {
+    const uint32_t t_tx = flight_packet::read_t_ms_from_tr_payload(buf, len);
+    uint8_t apl[6];
+    if (flight_packet::encode_ack_payload(apl, sizeof(apl), t_tx) == 6) {
+      (void)rf95.send(apl, sizeof(apl));
+      (void)rf95.waitPacketSent(3000);
     }
   }
+
+  const bool decoded =
+      flight_packet::try_print_decoded_csv(Serial, buf, len, &rssi);
+
+#if RPL_RX_SD_CS >= 0
+  if (rx_sd_ok && decoded) {
+    (void)flight_packet::try_print_decoded_csv(rx_log, buf, len, &rssi);
+    rx_log.flush();
+  }
+#endif
+
+  if (!decoded) {
+    RH_RF95::printBuffer("Received: ", buf, len);
+    if (len < sizeof(buf)) {
+      buf[len] = 0;
+    }
+    Serial.print(F("Got: "));
+    Serial.println(reinterpret_cast<char*>(buf));
+    Serial.print(F("RSSI "));
+    Serial.println(rssi, DEC);
+  }
+
+  digitalWrite(LED_BUILTIN, LOW);
 }

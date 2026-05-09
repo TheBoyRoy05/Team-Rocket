@@ -1,13 +1,20 @@
 #pragma once
 
 /*
-  BMP390 barometric pressure / temperature test (header-only)
+  BMP390 barometric pressure / temperature (header-only)
 
-  I2C wiring: SDA/SCL to the Feather M0 I2C bus, 3V3 + GND.
-  Default address 0x77; use 0x76 if the module ties SDO to GND.
+  - Default (RPL_BMP_MIN): Wire-only + Bosch integer math — smallest flash.
+  - M0 / full: RPL_BMP_MIN unset — Adafruit BMP3XX + Bosch library.
+
+  I2C: default 0x77; for 0x76 use build flag -D RPL_BMP390_I2C_ADDR=0x76 (min)
+  or change kI2cAddr below (Adafruit path).
 */
 
 #include <Arduino.h>
+
+#if defined(RPL_BMP_MIN) && RPL_BMP_MIN
+#include "bmp390_min.hpp"
+#else
 #include <Wire.h>
 #include <Adafruit_BMP3XX.h>
 
@@ -16,9 +23,7 @@
 namespace bmp390 {
 
 constexpr uint8_t kDefaultI2cAddr = BMP3XX_DEFAULT_ADDRESS;
-// If your breakout uses 0x76 instead, set kI2cAddr to 0x76.
 constexpr uint8_t kI2cAddr = kDefaultI2cAddr;
-
 constexpr float kSealevelPressureHpa = 1013.25f;
 
 inline Adafruit_BMP3XX& sensor() {
@@ -27,8 +32,6 @@ inline Adafruit_BMP3XX& sensor() {
 }
 
 inline void setup() {
-  // Serial.begin from sd::flight_log_setup / sketch if you want USB messages.
-
   Wire.begin();
 
   if (!sensor().begin_I2C(kI2cAddr, &Wire)) {
@@ -78,3 +81,4 @@ inline void loop() {
 }
 
 }  // namespace bmp390
+#endif

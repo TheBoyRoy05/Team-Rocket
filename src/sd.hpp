@@ -17,11 +17,19 @@
 
 #include "flight-log-types.hpp"
 
+#if defined(RPL_SD_BINARY) && RPL_SD_BINARY
+#include "flight_packet.hpp"
+#endif
+
 namespace sd {
 
 constexpr int kCsPin = 4;
 constexpr char kFlightCsv[] = "flight.csv";
-constexpr size_t kFlightBufferCap = 320;
+
+#ifndef RPL_SD_FLIGHT_BUF_CAP
+#define RPL_SD_FLIGHT_BUF_CAP 320
+#endif
+constexpr size_t kFlightBufferCap = RPL_SD_FLIGHT_BUF_CAP;
 
 namespace detail {
 
@@ -81,8 +89,13 @@ inline bool flight_buffer_push_line(const char* line, size_t line_len) {
 
 inline void add_float_field(char* line, int* pos, size_t cap, float v,
                             int prec, char sep) {
-  char num[16];
+  char num[24];
+#if defined(__AVR__)
   dtostrf(static_cast<double>(v), 0, prec, num);
+  num[sizeof(num) - 1] = '\0';
+#else
+  snprintf(num, sizeof(num), "%.*f", prec, static_cast<double>(v));
+#endif
   const int n =
       snprintf(line + *pos, cap - static_cast<size_t>(*pos), "%s%c", num, sep);
   if (n > 0) {
@@ -99,6 +112,15 @@ inline bool begin(int cs_pin = kCsPin) {
   SPI.begin();
   return SD.begin(cs_pin);
 }
+
+inline bool remove_file(const char* path) {
+  if (!SD.exists(path)) {
+    return true;
+  }
+  return SD.remove(path);
+}
+
+#if !defined(RPL_MINIMAL_SD) || !RPL_MINIMAL_SD
 
 // Low-level card + FAT summary (calls SPI.begin). Does not use SD.begin().
 // Serial must already be configured if you want output.
@@ -196,13 +218,6 @@ inline void dump_file_to_serial(const char* path) {
   Serial.println(F("sd: --- end ---"));
 }
 
-inline bool remove_file(const char* path) {
-  if (!SD.exists(path)) {
-    return true;
-  }
-  return SD.remove(path);
-}
-
 inline bool append_bytes(const char* path, const uint8_t* data, size_t len) {
   if (len == 0) {
     return true;
@@ -268,8 +283,10 @@ inline void session_flush() {
   }
 }
 
-// Serial + SD; opens flight.csv from the start of the session and writes the
-// CSV header.
+#endif  // !RPL_MINIMAL_SD
+
+// Serial + SD; opens flight.csv and writes CSV header (omit when RPL_SD_BINARY).
+#if !(defined(RPL_SD_BINARY) && RPL_SD_BINARY)
 inline bool flight_log_setup(int cs_pin = kCsPin) {
   Serial.begin(115200);
   const unsigned long usb_wait_start = millis();
@@ -291,17 +308,118 @@ inline bool flight_log_setup(int cs_pin = kCsPin) {
     return false;
   }
   detail::flight_file().println(
+#if defined(RPL_COMPACT_CSV) && RPL_COMPACT_CSV
+      F("millis,euler_h,euler_r,euler_p,lin_az,gyr_z,"
+        "bmp_ok,bmp_t_c,bmp_p_hpa,bmp_alt_m")
+#else
       F("millis,c_sys,c_gyro,c_accel,c_mag,"
         "euler_h,euler_r,euler_p,"
         "acc_gx,acc_gy,acc_gz,lin_ax,lin_ay,lin_az,"
         "gyr_x,gyr_y,gyr_z,mag_x,mag_y,mag_z,"
-        "bmp_ok,bmp_t_c,bmp_p_hpa,bmp_alt_m"));
+        "bmp_ok,bmp_t_c,bmp_p_hpa,bmp_alt_m")
+#endif
+  );
+  detail::flight_file().flush();
+  return true;
+}
+#endif
+
+#if defined(RPL_SD_BINARY) && RPL_SD_BINARY
+constexpr char kFlightBin[] = "flight.bin";
+
+inline bool flight_log_setup_bin(int cs_pin = kCsPin) {
+  Serial.begin(115200);
+  const unsigned long usb_wait_start = millis();
+  while (!Serial && (millis() - usb_wait_start) < 5000) {
+    delay(10);
+  }
+
+  if (!begin(cs_pin)) {
+    Serial.println(F("sd: flight.bin — SD begin failed"));
+    return false;
+  }
+  Serial.println(F("sd: flight.bin ok"));
+
+  detail::flight_sd_buffer_len() = 0;
+  SD.remove(kFlightBin);
+  detail::flight_file() = SD.open(kFlightBin, FILE_WRITE);
+  if (!detail::flight_file()) {
+    Serial.println(F("sd: open flight.bin failed"));
+    return false;
+  }
+  const uint8_t hdr[4] = {
+      'T', 'R', 'B',
+#if defined(RPL_ENABLE_LORA) && RPL_ENABLE_LORA
+      2
+#else
+      1
+#endif
+  };
+  detail::flight_file().write(hdr, sizeof(hdr));
   detail::flight_file().flush();
   return true;
 }
 
+#if defined(RPL_ENABLE_LORA) && RPL_ENABLE_LORA
+inline bool append_flight_bin(const uint8_t* pkt48, uint8_t lora_tx_done,
+                              uint8_t lora_ack_ok) {
+  File& f = detail::flight_file();
+  if (!f || pkt48 == nullptr) {
+    return false;
+  }
+  if (f.write(pkt48, flight_packet::kEncodedSize) != flight_packet::kEncodedSize) {
+    return false;
+  }
+  const uint8_t meta[2] = {lora_tx_done, lora_ack_ok};
+  if (f.write(meta, sizeof(meta)) != sizeof(meta)) {
+    return false;
+  }
+  f.flush();
+  return true;
+}
+#else
+inline bool append_flight_bin(const uint8_t* data, size_t len) {
+  File& f = detail::flight_file();
+  if (!f || data == nullptr || len == 0) {
+    return false;
+  }
+  if (f.write(data, len) != len) {
+    return false;
+  }
+  f.flush();
+  return true;
+}
+#endif
+#endif
+
+#if !(defined(RPL_SD_BINARY) && RPL_SD_BINARY)
 inline bool append_flight_row(unsigned long t, const flight::ImuSample& imu,
                               const flight::BmpSample& bmp) {
+#if defined(RPL_COMPACT_CSV) && RPL_COMPACT_CSV
+  static char line[160];
+  int pos = snprintf(line, sizeof(line), "%lu,", t);
+  if (pos < 0 || static_cast<size_t>(pos) >= sizeof(line)) {
+    return false;
+  }
+  detail::add_float_field(line, &pos, sizeof(line), imu.euler_h, 2, ',');
+  detail::add_float_field(line, &pos, sizeof(line), imu.euler_r, 2, ',');
+  detail::add_float_field(line, &pos, sizeof(line), imu.euler_p, 2, ',');
+  detail::add_float_field(line, &pos, sizeof(line), imu.lin_az, 3, ',');
+  detail::add_float_field(line, &pos, sizeof(line), imu.gyr_z, 3, ',');
+  const int n = snprintf(line + pos, sizeof(line) - static_cast<size_t>(pos), "%u,",
+                         bmp.ok ? 1u : 0u);
+  if (n > 0) {
+    pos += n;
+  }
+  if (bmp.ok) {
+    detail::add_float_field(line, &pos, sizeof(line), bmp.temp_c, 2, ',');
+    detail::add_float_field(line, &pos, sizeof(line), bmp.pressure_hpa, 2, ',');
+    detail::add_float_field(line, &pos, sizeof(line), bmp.altitude_m, 1, '\n');
+  } else {
+    snprintf(line + pos, sizeof(line) - static_cast<size_t>(pos), ",,\n");
+  }
+  return detail::flight_buffer_push_line(line, strlen(line));
+#else
   static char line[272];
   int pos = snprintf(
       line, sizeof(line), "%lu,%u,%u,%u,%u,", t, static_cast<unsigned>(imu.cal_sys),
@@ -341,7 +459,9 @@ inline bool append_flight_row(unsigned long t, const flight::ImuSample& imu,
   }
 
   return detail::flight_buffer_push_line(line, strlen(line));
+#endif
 }
+#endif  // !(RPL_SD_BINARY)
 
 inline void flight_log_flush() { detail::flight_flush_to_card(); }
 
