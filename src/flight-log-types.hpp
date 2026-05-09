@@ -13,9 +13,6 @@ struct ImuSample {
   float euler_h{};
   float euler_r{};
   float euler_p{};
-  float acc_gx{};
-  float acc_gy{};
-  float acc_gz{};
   float lin_ax{};
   float lin_ay{};
   float lin_az{};

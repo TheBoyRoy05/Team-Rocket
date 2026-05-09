@@ -1,11 +1,8 @@
 #pragma once
 
 /*
-  Feather M0 Adalogger (and similar): SPI SD card helpers — init, diagnostics,
-  read to Serial, write with explicit paths/payloads, flight CSV buffering.
-
-  Default CS: 4 (onboard microSD). Adalogger FeatherWing on a plain Feather
-  often uses CS 10 — pass a different pin to begin() / print_card_info().
+  SPI SD card helpers: diagnostics, flight CSV or binary (`RPL_SD_BINARY`),
+  optional BMP columns (`RPL_NO_BMP`).
 */
 
 #include <Arduino.h>
@@ -17,11 +14,32 @@
 
 #include "flight-log-types.hpp"
 
+// RPL_NO_BMP: omit BMP columns / baro library (needed on 32u4 with LoRa).
+#if !defined(RPL_NO_BMP)
+#define RPL_NO_BMP 0
+#endif
+
+// Raw binary frames on SD (smaller FAT writes vs CSV text formatting).
+#if !defined(RPL_SD_BINARY)
+#define RPL_SD_BINARY 0
+#endif
+
+#ifndef RPL_SD_FLIGHT_BUF_CAP
+#define RPL_SD_FLIGHT_BUF_CAP 320
+#endif
+
 namespace sd {
 
 constexpr int kCsPin = 4;
 constexpr char kFlightCsv[] = "flight.csv";
-constexpr size_t kFlightBufferCap = 320;
+constexpr char kFlightBin[] = "flight.bin";
+constexpr size_t kFlightBufferCap = RPL_SD_FLIGHT_BUF_CAP;
+
+#if RPL_NO_BMP
+constexpr size_t kFlightCsvLineCap = 220;
+#else
+constexpr size_t kFlightCsvLineCap = 260;
+#endif
 
 namespace detail {
 
@@ -40,6 +58,11 @@ inline size_t& flight_sd_buffer_len() {
   return len;
 }
 
+inline bool& flight_log_write_enabled() {
+  static bool enabled = false;
+  return enabled;
+}
+
 inline File& session_file() {
   static File f;
   return f;
@@ -56,11 +79,12 @@ inline void setup_32u4() {
 inline void flight_flush_to_card() {
   File& f = flight_file();
   size_t& len = flight_sd_buffer_len();
-  if (f && len > 0) {
-    f.write(flight_sd_buffer(), len);
-    f.flush();
-    len = 0;
+  if (!flight_log_write_enabled() || !f || len == 0) {
+    return;
   }
+  f.write(flight_sd_buffer(), len);
+  f.flush();
+  len = 0;
 }
 
 inline bool flight_buffer_push_line(const char* line, size_t line_len) {
@@ -91,6 +115,136 @@ inline void add_float_field(char* line, int* pos, size_t cap, float v,
 }
 
 }  // namespace detail
+
+#if RPL_SD_BINARY
+#pragma pack(push, 1)
+struct FlightBinaryHeader {
+  char magic[4];   // "RPLB"
+  uint8_t version;   // 2 = no acc_g fields in FlightBinaryRecord
+  uint8_t flags;    // bit0: records include BMP fields
+};
+
+struct FlightBinaryRecord {
+  uint32_t t_ms;
+  uint8_t cal_sys;
+  uint8_t cal_gyro;
+  uint8_t cal_accel;
+  uint8_t cal_mag;
+  float euler_h;
+  float euler_r;
+  float euler_p;
+  float lin_ax;
+  float lin_ay;
+  float lin_az;
+  float gyr_x;
+  float gyr_y;
+  float gyr_z;
+  float mag_x;
+  float mag_y;
+  float mag_z;
+#if !RPL_NO_BMP
+  uint8_t bmp_ok;
+  uint8_t pad[3];
+  float bmp_t_c;
+  float bmp_p_hpa;
+  float bmp_alt_m;
+#endif
+};
+#pragma pack(pop)
+#endif  // RPL_SD_BINARY
+
+/** One CSV text line (with trailing '\\n') for SD, Serial, or LoRa — single source of truth. */
+inline int format_flight_csv_row(char* line, size_t cap, unsigned long t,
+                                 const flight::ImuSample& imu,
+                                 const flight::BmpSample& bmp) {
+#if RPL_NO_BMP
+  (void)bmp;
+#endif
+  if (cap < kFlightCsvLineCap) {
+    return -1;
+  }
+  int pos = snprintf(
+      line, cap, "%lu,%u,%u,%u,%u,", t, static_cast<unsigned>(imu.cal_sys),
+      static_cast<unsigned>(imu.cal_gyro), static_cast<unsigned>(imu.cal_accel),
+      static_cast<unsigned>(imu.cal_mag));
+  if (pos < 0 || static_cast<size_t>(pos) >= cap) {
+    return -1;
+  }
+
+  detail::add_float_field(line, &pos, cap, imu.euler_h, 2, ',');
+  detail::add_float_field(line, &pos, cap, imu.euler_r, 2, ',');
+  detail::add_float_field(line, &pos, cap, imu.euler_p, 2, ',');
+  detail::add_float_field(line, &pos, cap, imu.lin_ax, 3, ',');
+  detail::add_float_field(line, &pos, cap, imu.lin_ay, 3, ',');
+  detail::add_float_field(line, &pos, cap, imu.lin_az, 3, ',');
+  detail::add_float_field(line, &pos, cap, imu.gyr_x, 3, ',');
+  detail::add_float_field(line, &pos, cap, imu.gyr_y, 3, ',');
+  detail::add_float_field(line, &pos, cap, imu.gyr_z, 3, ',');
+  detail::add_float_field(line, &pos, cap, imu.mag_x, 3, ',');
+  detail::add_float_field(line, &pos, cap, imu.mag_y, 3, ',');
+  detail::add_float_field(line, &pos, cap, imu.mag_z, 3, ',');
+
+#if !RPL_NO_BMP
+  const int n = snprintf(line + pos, cap - static_cast<size_t>(pos), "%u,",
+                         bmp.ok ? 1u : 0u);
+  if (n > 0) {
+    pos += n;
+  }
+  if (bmp.ok) {
+    detail::add_float_field(line, &pos, cap, bmp.temp_c, 2, ',');
+    detail::add_float_field(line, &pos, cap, bmp.pressure_hpa, 2, ',');
+    detail::add_float_field(line, &pos, cap, bmp.altitude_m, 1, '\n');
+  } else {
+    snprintf(line + pos, cap - static_cast<size_t>(pos), ",,\n");
+  }
+#else
+  if (pos > 0 && static_cast<size_t>(pos) < cap && line[pos - 1] == ',') {
+    line[pos - 1] = '\n';
+  } else {
+    snprintf(line + pos, cap - static_cast<size_t>(pos), "\n");
+  }
+#endif
+  return static_cast<int>(strlen(line));
+}
+
+#if RPL_SD_BINARY
+inline bool append_flight_binary_record(unsigned long t, const flight::ImuSample& imu,
+                                        const flight::BmpSample& bmp) {
+#if RPL_NO_BMP
+  (void)bmp;
+#endif
+  File& f = detail::flight_file();
+  if (!f) {
+    return false;
+  }
+  FlightBinaryRecord r{};
+  r.t_ms = static_cast<uint32_t>(t);
+  r.cal_sys = imu.cal_sys;
+  r.cal_gyro = imu.cal_gyro;
+  r.cal_accel = imu.cal_accel;
+  r.cal_mag = imu.cal_mag;
+  r.euler_h = imu.euler_h;
+  r.euler_r = imu.euler_r;
+  r.euler_p = imu.euler_p;
+  r.lin_ax = imu.lin_ax;
+  r.lin_ay = imu.lin_ay;
+  r.lin_az = imu.lin_az;
+  r.gyr_x = imu.gyr_x;
+  r.gyr_y = imu.gyr_y;
+  r.gyr_z = imu.gyr_z;
+  r.mag_x = imu.mag_x;
+  r.mag_y = imu.mag_y;
+  r.mag_z = imu.mag_z;
+#if !RPL_NO_BMP
+  r.bmp_ok = bmp.ok ? 1U : 0U;
+  r.bmp_t_c = bmp.temp_c;
+  r.bmp_p_hpa = bmp.pressure_hpa;
+  r.bmp_alt_m = bmp.altitude_m;
+#endif
+  const size_t nw = f.write(reinterpret_cast<const uint8_t*>(&r), sizeof(r));
+  return nw == sizeof(r);
+}
+#endif  // RPL_SD_BINARY
 
 /** USB Serial @ 115200 with short wait for host (Feather 32u4 CDC). */
 inline void setup_32u4() { detail::setup_32u4(); }
@@ -268,8 +422,9 @@ inline void session_flush() {
   }
 }
 
-// Serial + SD; opens flight.csv from the start of the session and writes the
-// CSV header.
+// Serial + SD; opens flight.csv (text) or flight.bin (packed frames) and writes
+// a header when using CSV. If the card/ file cannot be opened, telemetry still
+// runs but nothing is written to SD (USB / LoRa mirror unaffected).
 inline bool flight_log_setup(int cs_pin = kCsPin) {
   Serial.begin(115200);
   const unsigned long usb_wait_start = millis();
@@ -277,74 +432,109 @@ inline bool flight_log_setup(int cs_pin = kCsPin) {
     delay(10);
   }
 
-  if (!begin(cs_pin)) {
-    Serial.println(F("sd: flight log — SD begin failed (card or CS pin?)"));
-    return false;
-  }
-  Serial.println(F("sd: flight log — ok, flight.csv"));
-
+  detail::flight_log_write_enabled() = false;
   detail::flight_sd_buffer_len() = 0;
+
+  if (!begin(cs_pin)) {
+    Serial.println(F("sd: SD.begin failed — check card, socket, CS pin (no SD log)"));
+    return true;
+  }
+
+#if RPL_SD_BINARY
+  SD.remove(kFlightBin);
+  detail::flight_file() = SD.open(kFlightBin, FILE_WRITE);
+  if (!detail::flight_file()) {
+    Serial.println(F("sd: open flight.bin failed — no SD log"));
+    return true;
+  }
+  Serial.println(F("sd: flight log — ok, flight.bin"));
+  FlightBinaryHeader hdr{};
+  hdr.magic[0] = 'R';
+  hdr.magic[1] = 'P';
+  hdr.magic[2] = 'L';
+  hdr.magic[3] = 'B';
+  hdr.version = 2;
+  hdr.flags = RPL_NO_BMP ? static_cast<uint8_t>(0) : static_cast<uint8_t>(1);
+  detail::flight_file().write(reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr));
+  detail::flight_file().flush();
+  detail::flight_log_write_enabled() = true;
+#else
   SD.remove(kFlightCsv);
   detail::flight_file() = SD.open(kFlightCsv, FILE_WRITE);
   if (!detail::flight_file()) {
-    Serial.println(F("sd: open flight.csv failed"));
-    return false;
+    Serial.println(F("sd: open flight.csv failed — no SD log (card formatted FAT32?)"));
+    return true;
   }
+  Serial.println(F("sd: flight log — ok, flight.csv"));
+#if !RPL_NO_BMP
   detail::flight_file().println(
       F("millis,c_sys,c_gyro,c_accel,c_mag,"
         "euler_h,euler_r,euler_p,"
-        "acc_gx,acc_gy,acc_gz,lin_ax,lin_ay,lin_az,"
+        "lin_ax,lin_ay,lin_az,"
         "gyr_x,gyr_y,gyr_z,mag_x,mag_y,mag_z,"
         "bmp_ok,bmp_t_c,bmp_p_hpa,bmp_alt_m"));
+#else
+  detail::flight_file().println(
+      F("millis,c_sys,c_gyro,c_accel,c_mag,"
+        "euler_h,euler_r,euler_p,"
+        "lin_ax,lin_ay,lin_az,"
+        "gyr_x,gyr_y,gyr_z,mag_x,mag_y,mag_z"));
+#endif
   detail::flight_file().flush();
+  detail::flight_log_write_enabled() = true;
+#endif
   return true;
 }
 
+/** If mirror_line is non-null, writes the same CSV line used for radios / USB logs. */
 inline bool append_flight_row(unsigned long t, const flight::ImuSample& imu,
-                              const flight::BmpSample& bmp) {
-  static char line[272];
-  int pos = snprintf(
-      line, sizeof(line), "%lu,%u,%u,%u,%u,", t, static_cast<unsigned>(imu.cal_sys),
-      static_cast<unsigned>(imu.cal_gyro), static_cast<unsigned>(imu.cal_accel),
-      static_cast<unsigned>(imu.cal_mag));
-  if (pos < 0 || static_cast<size_t>(pos) >= sizeof(line)) {
+                              const flight::BmpSample& bmp, Print* mirror_line = nullptr) {
+  static char line[kFlightCsvLineCap];
+  const int n = format_flight_csv_row(line, sizeof(line), t, imu, bmp);
+  if (n <= 0) {
     return false;
   }
-
-  detail::add_float_field(line, &pos, sizeof(line), imu.euler_h, 2, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.euler_r, 2, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.euler_p, 2, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.acc_gx, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.acc_gy, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.acc_gz, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.lin_ax, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.lin_ay, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.lin_az, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.gyr_x, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.gyr_y, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.gyr_z, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.mag_x, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.mag_y, 3, ',');
-  detail::add_float_field(line, &pos, sizeof(line), imu.mag_z, 3, ',');
-
-  const int n = snprintf(line + pos, sizeof(line) - static_cast<size_t>(pos), "%u,",
-                         bmp.ok ? 1u : 0u);
-  if (n > 0) {
-    pos += n;
+  if (mirror_line != nullptr) {
+    mirror_line->write(reinterpret_cast<const uint8_t*>(line), static_cast<size_t>(n));
   }
-  if (bmp.ok) {
-    detail::add_float_field(line, &pos, sizeof(line), bmp.temp_c, 2, ',');
-    detail::add_float_field(line, &pos, sizeof(line), bmp.pressure_hpa, 2, ',');
-    detail::add_float_field(line, &pos, sizeof(line), bmp.altitude_m, 1, '\n');
-  } else {
-    snprintf(line + pos, sizeof(line) - static_cast<size_t>(pos), ",,\n");
+#if !RPL_SD_BINARY
+  if (!detail::flight_log_write_enabled()) {
+    return true;
   }
-
-  return detail::flight_buffer_push_line(line, strlen(line));
+  return detail::flight_buffer_push_line(line, static_cast<size_t>(n));
+#else
+  if (!detail::flight_log_write_enabled()) {
+    return true;
+  }
+  const bool ok = append_flight_binary_record(t, imu, bmp);
+  File& f = detail::flight_file();
+  if (f) {
+    f.flush();
+  }
+  return ok;
+#endif
 }
 
-inline void flight_log_flush() { detail::flight_flush_to_card(); }
+inline void flight_log_flush() {
+#if RPL_SD_BINARY
+  if (!detail::flight_log_write_enabled()) {
+    return;
+  }
+  File& f = detail::flight_file();
+  if (f) {
+    f.flush();
+  }
+#else
+  detail::flight_flush_to_card();
+#endif
+}
 
-inline bool clear_flight_log() { return remove_file(kFlightCsv); }
+inline bool clear_flight_log() {
+#if RPL_SD_BINARY
+  return remove_file(kFlightBin);
+#else
+  return remove_file(kFlightCsv);
+#endif
+}
 
 }  // namespace sd
